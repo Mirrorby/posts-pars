@@ -2,6 +2,7 @@ import os, datetime as dt, re, html
 import feedparser, gspread, requests
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
+from zoneinfo import ZoneInfo
 
 # ---------- Настройки ----------
 DEFAULT_CHANNELS = ["MELOCHOV", "ABKS07", "jjsbossj", "toolsSADA"]
@@ -13,17 +14,14 @@ SHEET_NAME   = os.getenv("SHEET_NAME", "Posts")
 STATE_SHEET  = os.getenv("STATE_SHEET", "State")
 GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
-UA = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.2)"
+UA = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.3)"
+MSK = ZoneInfo("Europe/Moscow")
+UTC = ZoneInfo("UTC")
 
 # ---------- Текст: очистка ----------
 EMOJI_RE = re.compile(
-    "["                                   # основные диапазоны эмодзи
-    "\U0001F300-\U0001F6FF"
-    "\U0001F900-\U0001F9FF"
-    "\U0001FA70-\U0001FAFF"
-    "\U00002700-\U000027BF"
-    "\U00002600-\U000026FF"
-    "]+", flags=re.UNICODE
+    "[" "\U0001F300-\U0001F6FF" "\U0001F900-\U0001F9FF" "\U0001FA70-\U0001FAFF"
+    "\U00002700-\U000027BF" "\U00002600-\U000026FF" "]+", flags=re.UNICODE
 )
 def strip_emoji(s:str)->str:
     return EMOJI_RE.sub("", s)
@@ -38,12 +36,11 @@ def strip_html(x:str)->str:
 def normalize_text(raw:str, limit=2000)->str:
     t = strip_html(raw)
     t = t.replace("\r", "").replace("\t", " ")
-    t = re.sub(r"[ \u200b\u2060]{2,}", " ", t)             # двойные пробелы/zero-width
-    t = re.sub(r"\n\s*\n\s*", "\n", t)                     # лишние пустые строки
+    t = re.sub(r"[ \u200b\u2060]{2,}", " ", t)
+    t = re.sub(r"\n\s*\n\s*", "\n", t)
     t = re.sub(r"[ \u00A0]{2,}", " ", t)
     t = strip_emoji(t)
-    t = t.strip()
-    return t[:limit]
+    return t.strip()[:limit]
 
 def make_title_and_text(clean:str, title_limit=120, text_limit=2000):
     lines = [l.strip() for l in clean.split("\n") if l.strip()]
@@ -53,14 +50,37 @@ def make_title_and_text(clean:str, title_limit=120, text_limit=2000):
     rest  = " ".join(lines[1:]).strip()
     return title, rest[:text_limit]
 
-def parse_date(s:str|None)->str:
-    # YYYY-MM-DD HH:MM:SS (UTC)
+# ---------- Дата/время ----------
+def fmt_msk(dt_obj: dt.datetime) -> str:
+    """Формат YYYY-MM-DD HH:MM:SS в часовом поясе Москвы."""
+    return dt_obj.astimezone(MSK).strftime("%Y-%m-%d %H:%M:%S")
+
+def to_utc(dt_obj: dt.datetime | None) -> dt.datetime:
+    if dt_obj is None:
+        return dt.datetime.now(tz=UTC)
+    if dt_obj.tzinfo is None:
+        return dt_obj.replace(tzinfo=UTC)
+    return dt_obj.astimezone(UTC)
+
+def parse_any_datetime_to_utc(s: str | None) -> dt.datetime:
+    # 1) пробуем feedparser (RFC822 и пр.)
     try:
-        t = feedparser._parse_date(s) if s else None
-        if t: return dt.datetime(*t[:6]).strftime("%Y-%m-%d %H:%M:%S")
+        if s:
+            tup = feedparser._parse_date(s)
+            if tup:
+                return dt.datetime(*tup[:6], tzinfo=UTC)
     except Exception:
         pass
-    return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # 2) ISO 8601 (в том числе t.me time@datetime)
+    try:
+        if s:
+            iso = s.replace("Z", "+00:00")
+            d = dt.datetime.fromisoformat(iso)
+            return to_utc(d)
+    except Exception:
+        pass
+    # fallback: сейчас
+    return dt.datetime.now(tz=UTC)
 
 # ---------- Sheets ----------
 def gs_open():
@@ -71,59 +91,47 @@ def gs_open():
     try:
         ws = sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=5)
-        ws.append_row(["Date","Channel","Link","Title","Text"])  # <-- порядок сменили!
+        ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=6)
+        # ВАЖНО: новый порядок колонок
+        ws.append_row(["PublishedAt (MSK)","AddedAt (MSK)","Channel","Link","Title","Text"])
     try:
         st = sh.worksheet(STATE_SHEET)
     except gspread.WorksheetNotFound:
         st = sh.add_worksheet(STATE_SHEET, rows=200, cols=2)
         st.append_row(["Channel","LastLink"])
-    # Базовое форматирование
+    # Лёгкое форматирование (ширины + wrap clip)
     try:
         sh.batch_update({
             "requests":[
-                {"updateSheetProperties":{
-                    "properties":{"sheetId": ws.id},
-                    "fields":""
-                }},
                 {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":5},
-                    "properties":{"pixelSize": 110},
-                    "fields":"pixelSize"
-                }},
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":6},
+                    "properties":{"pixelSize": 140}, "fields":"pixelSize"}},
                 {"updateDimensionProperties":{
                     "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":2,"endIndex":3},
-                    "properties":{"pixelSize": 220},
-                    "fields":"pixelSize"
-                }},
+                    "properties":{"pixelSize": 110}, "fields":"pixelSize"}},
                 {"updateDimensionProperties":{
                     "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":3,"endIndex":4},
-                    "properties":{"pixelSize": 280},
-                    "fields":"pixelSize"
-                }},
+                    "properties":{"pixelSize": 260}, "fields":"pixelSize"}},
                 {"updateDimensionProperties":{
                     "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":4,"endIndex":5},
-                    "properties":{"pixelSize": 600},
-                    "fields":"pixelSize"
-                }},
+                    "properties":{"pixelSize": 280}, "fields":"pixelSize"}},
+                {"updateDimensionProperties":{
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":5,"endIndex":6},
+                    "properties":{"pixelSize": 600}, "fields":"pixelSize"}},
                 {"repeatCell":{
                     "range":{"sheetId": ws.id},
                     "cell":{"userEnteredFormat":{
                         "wrapStrategy":"CLIP",
                         "verticalAlignment":"TOP",
-                        "horizontalAlignment":"LEFT"
-                    }},
-                    "fields":"userEnteredFormat(wrapStrategy,verticalAlignment,horizontalAlignment)"
-                }},
+                        "horizontalAlignment":"LEFT"}},
+                    "fields":"userEnteredFormat(wrapStrategy,verticalAlignment,horizontalAlignment)"}},
                 {"updateSheetProperties":{
                     "properties":{"sheetId": ws.id, "gridProperties":{"frozenRowCount":1}},
-                    "fields":"gridProperties.frozenRowCount"
-                }},
-            ]
-        })
+                    "fields":"gridProperties.frozenRowCount"}}
+            ]})
     except Exception:
         pass
-    return ws, st, sh
+    return ws, st
 
 def load_state(st):
     ch = st.col_values(1)[1:]
@@ -160,11 +168,12 @@ def rss_entries(username: str):
                     text_raw = getattr(e, "summary", "") or ""
                     text = normalize_text(text_raw)
                     title, text2 = make_title_and_text(text)
+                    pub_utc = parse_any_datetime_to_utc(getattr(e, "published", ""))
                     out.append({
-                        "date": parse_date(getattr(e, "published", "")),
+                        "published_msk": fmt_msk(pub_utc),
+                        "link": (getattr(e, "link", "") or getattr(e, "id", "") or ""),
                         "title": title,
-                        "link":  getattr(e, "link", "") or getattr(e, "id", "") or "",
-                        "text":  text2 if text2 else text,   # если одной строки хватило — кладём её в Text
+                        "text":  text2 if text2 else text,
                     })
                 print(f"[info] RSS OK via {base} for {username}: {len(out)}")
                 return out
@@ -189,15 +198,14 @@ def html_entries(username: str, limit=100):
                 continue
             link = a["href"]
             text_el = msg.select_one(".tgme_widget_message_text")
-            raw = text_el.get_text("\n", strip=True) if text_el else ""
-            clean = normalize_text(raw)
+            clean = normalize_text(text_el.get_text("\n", strip=True) if text_el else "")
             title, rest = make_title_and_text(clean)
             time_el = msg.select_one("time")
-            date = time_el.get("datetime") if time_el else ""
+            pub_utc = parse_any_datetime_to_utc(time_el.get("datetime") if time_el else None)
             items.append({
-                "date": parse_date(date),
-                "title": title,
+                "published_msk": fmt_msk(pub_utc),
                 "link": link,
+                "title": title,
                 "text": rest if rest else clean
             })
             if len(items) >= limit:
@@ -218,7 +226,7 @@ def fetch_entries(username: str):
 # ---------- Основной запуск ----------
 def main():
     channels = norm_channels(os.getenv("CHANNELS_CSV"))
-    ws, st, _ = gs_open()
+    ws, st = gs_open()
     state = load_state(st)
 
     for ch in channels:
@@ -231,7 +239,7 @@ def main():
 
         # oldest -> newest
         for e in reversed(entries):
-            link = e["link"] or (e["title"] + "|" + e["date"])
+            link = e["link"] or (e["title"] + "|" + e["published_msk"])
             if not last_link:
                 fresh.append(e)
                 if len(fresh) > INITIAL_LIMIT:
@@ -246,10 +254,10 @@ def main():
             print(f"[ok] {ch}: no new items")
             continue
 
-        rows = [[e["date"], ch, e["link"], e["title"], e["text"]] for e in fresh]
+        now_msk = fmt_msk(dt.datetime.now(tz=UTC))
+        rows = [[e["published_msk"], now_msk, ch, e["link"], e["title"], e["text"]] for e in fresh]
         ws.append_rows(rows, value_input_option="RAW")
-        last_link = rows[-1][2]  # C: Link
-        save_state(st, ch, last_link)
+        save_state(st, ch, rows[-1][2+1])  # last link = column D (index 3 overall)
         print(f"[append] {ch}: {len(rows)} rows")
 
 if __name__ == "__main__":
