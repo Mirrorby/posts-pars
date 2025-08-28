@@ -1,0 +1,38 @@
+name: RSS to Sheets
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # каждые 5 минут
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write GCP key file
+        run: echo "$GCP_JSON" > gcp_sa.json
+        env:
+          GCP_JSON: ${{ secrets.GCP_JSON }}
+
+      - name: Run importer
+        env:
+          GSHEET_TITLE: ${{ secrets.GSHEET_TITLE }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          GCP_JSON_PATH: gcp_sa.json
+          # Ниже опционально можно переопределить каналы и базу RSS:
+          # CHANNELS_CSV: "MELOCHOV,ABKS07,jjsbossj,toolsSADA"
+          # RSS_BASE: "https://rsshub.app"
+          # INITIAL_LIMIT: "20"
+        run: python rss_to_sheets.py
