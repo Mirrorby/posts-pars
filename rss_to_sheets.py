@@ -14,17 +14,13 @@ SHEET_NAME   = os.getenv("SHEET_NAME", "Posts")
 STATE_SHEET  = os.getenv("STATE_SHEET", "State")
 GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
-UA = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.3)"
+UA  = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.4)"
 MSK = ZoneInfo("Europe/Moscow")
 UTC = ZoneInfo("UTC")
 
 # ---------- Текст: очистка ----------
-EMOJI_RE = re.compile(
-    "[" "\U0001F300-\U0001F6FF" "\U0001F900-\U0001F9FF" "\U0001FA70-\U0001FAFF"
-    "\U00002700-\U000027BF" "\U00002600-\U000026FF" "]+", flags=re.UNICODE
-)
-def strip_emoji(s:str)->str:
-    return EMOJI_RE.sub("", s)
+EMOJI_RE = re.compile("[" "\U0001F300-\U0001F6FF" "\U0001F900-\U0001F9FF" "\U0001FA70-\U0001FAFF" "\U00002700-\U000027BF" "\U00002600-\U000026FF" "]+")
+def strip_emoji(s:str)->str: return EMOJI_RE.sub("", s)
 
 def strip_html(x:str)->str:
     if not x: return ""
@@ -44,43 +40,47 @@ def normalize_text(raw:str, limit=2000)->str:
 
 def make_title_and_text(clean:str, title_limit=120, text_limit=2000):
     lines = [l.strip() for l in clean.split("\n") if l.strip()]
-    if not lines:
-        return "", ""
+    if not lines: return "", ""
     title = lines[0][:title_limit]
     rest  = " ".join(lines[1:]).strip()
     return title, rest[:text_limit]
 
 # ---------- Дата/время ----------
 def fmt_msk(dt_obj: dt.datetime) -> str:
-    """Формат YYYY-MM-DD HH:MM:SS в часовом поясе Москвы."""
     return dt_obj.astimezone(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
 def to_utc(dt_obj: dt.datetime | None) -> dt.datetime:
-    if dt_obj is None:
-        return dt.datetime.now(tz=UTC)
-    if dt_obj.tzinfo is None:
-        return dt_obj.replace(tzinfo=UTC)
+    if dt_obj is None: return dt.datetime.now(tz=UTC)
+    if dt_obj.tzinfo is None: return dt_obj.replace(tzinfo=UTC)
     return dt_obj.astimezone(UTC)
 
 def parse_any_datetime_to_utc(s: str | None) -> dt.datetime:
-    # 1) пробуем feedparser (RFC822 и пр.)
     try:
         if s:
             tup = feedparser._parse_date(s)
-            if tup:
-                return dt.datetime(*tup[:6], tzinfo=UTC)
-    except Exception:
-        pass
-    # 2) ISO 8601 (в том числе t.me time@datetime)
+            if tup: return dt.datetime(*tup[:6], tzinfo=UTC)
+    except Exception: pass
     try:
         if s:
             iso = s.replace("Z", "+00:00")
             d = dt.datetime.fromisoformat(iso)
             return to_utc(d)
-    except Exception:
-        pass
-    # fallback: сейчас
+    except Exception: pass
     return dt.datetime.now(tz=UTC)
+
+# ---------- Ссылки/ключи (анти-дубль) ----------
+TME_RE = re.compile(r"https?://t\.me/(?:s/)?([^/]+)/(\d+)", re.I)
+
+def canonical_link(link: str, channel_hint: str | None = None) -> str:
+    """Канонизируем ссылку на пост: https://t.me/<username>/<id>; убираем параметры."""
+    if not link: return ""
+    m = TME_RE.search(link)
+    if m:
+        user, mid = m.group(1), m.group(2)
+        return f"https://t.me/{user}/{mid}"
+    # обрубим параметры и хвосты
+    core = link.split("?")[0].rstrip("/")
+    return core.lower()
 
 # ---------- Sheets ----------
 def gs_open():
@@ -92,45 +92,12 @@ def gs_open():
         ws = sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=6)
-        # ВАЖНО: новый порядок колонок
         ws.append_row(["PublishedAt (MSK)","AddedAt (MSK)","Channel","Link","Title","Text"])
     try:
         st = sh.worksheet(STATE_SHEET)
     except gspread.WorksheetNotFound:
         st = sh.add_worksheet(STATE_SHEET, rows=200, cols=2)
         st.append_row(["Channel","LastLink"])
-    # Лёгкое форматирование (ширины + wrap clip)
-    try:
-        sh.batch_update({
-            "requests":[
-                {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":6},
-                    "properties":{"pixelSize": 140}, "fields":"pixelSize"}},
-                {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":2,"endIndex":3},
-                    "properties":{"pixelSize": 110}, "fields":"pixelSize"}},
-                {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":3,"endIndex":4},
-                    "properties":{"pixelSize": 260}, "fields":"pixelSize"}},
-                {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":4,"endIndex":5},
-                    "properties":{"pixelSize": 280}, "fields":"pixelSize"}},
-                {"updateDimensionProperties":{
-                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":5,"endIndex":6},
-                    "properties":{"pixelSize": 600}, "fields":"pixelSize"}},
-                {"repeatCell":{
-                    "range":{"sheetId": ws.id},
-                    "cell":{"userEnteredFormat":{
-                        "wrapStrategy":"CLIP",
-                        "verticalAlignment":"TOP",
-                        "horizontalAlignment":"LEFT"}},
-                    "fields":"userEnteredFormat(wrapStrategy,verticalAlignment,horizontalAlignment)"}},
-                {"updateSheetProperties":{
-                    "properties":{"sheetId": ws.id, "gridProperties":{"frozenRowCount":1}},
-                    "fields":"gridProperties.frozenRowCount"}}
-            ]})
-    except Exception:
-        pass
     return ws, st
 
 def load_state(st):
@@ -140,22 +107,30 @@ def load_state(st):
 
 def save_state(st, channel, last_link):
     cells = st.findall(channel, in_column=1)
-    if cells:
-        st.update_cell(cells[-1].row, 2, last_link)
-    else:
-        st.append_row([channel, last_link])
+    if cells: st.update_cell(cells[-1].row, 2, last_link)
+    else:     st.append_row([channel, last_link])
+
+def known_links_set(ws, channel: str, window: int = 400) -> set[str]:
+    """Берём последние ~window строк и собираем ссылки этого канала для анти-дублей."""
+    # дешево и сердито: получим весь диапазон D (Link) и C (Channel), возьмём хвост.
+    values = ws.get_all_values()
+    if len(values) <= 1: return set()
+    tail = values[-min(window, len(values)-1):]  # без заголовка
+    out = set()
+    for row in tail:
+        if len(row) < 4:  # должны быть хотя бы C и D
+            continue
+        ch = row[2].strip()
+        ln = row[3].strip()
+        if ch == channel and ln:
+            out.add(canonical_link(ln, ch))
+    return out
 
 # ---------- Источники ----------
 def norm_channels(csv: str | None):
-    if not csv:
-        return DEFAULT_CHANNELS
+    if not csv: return DEFAULT_CHANNELS
     parts = [p.strip() for p in csv.split(",") if p.strip()]
-    out = []
-    for p in parts:
-        p = p.lstrip("@").split("/")[-1]
-        if p:
-            out.append(p)
-    return out
+    return [p.lstrip("@").split("/")[-1] for p in parts if p]
 
 def rss_entries(username: str):
     for base in RSS_BASES:
@@ -165,8 +140,7 @@ def rss_entries(username: str):
             if f.entries:
                 out = []
                 for e in f.entries:
-                    text_raw = getattr(e, "summary", "") or ""
-                    text = normalize_text(text_raw)
+                    text = normalize_text(getattr(e, "summary", "") or "")
                     title, text2 = make_title_and_text(text)
                     pub_utc = parse_any_datetime_to_utc(getattr(e, "published", ""))
                     out.append({
@@ -234,19 +208,28 @@ def main():
         if not entries:
             continue
 
-        last_link = state.get(ch, "")
+        # анти-дубль: считаем известные ссылки этого канала из таблицы (последние ~400 строк)
+        known = known_links_set(ws, ch, window=600)
+
+        last_link = canonical_link(state.get(ch, ""), ch)
         fresh = []
 
         # oldest -> newest
         for e in reversed(entries):
-            link = e["link"] or (e["title"] + "|" + e["published_msk"])
+            raw_link = e["link"] or (e["title"] + "|" + e["published_msk"])
+            key = canonical_link(raw_link, ch)
+
+            # пропускаем, если уже есть в таблице (надёжнее, чем только "последняя ссылка")
+            if key and key in known:
+                continue
+
             if not last_link:
-                fresh.append(e)
+                fresh.append((key, e))
                 if len(fresh) > INITIAL_LIMIT:
                     fresh = fresh[-INITIAL_LIMIT:]
             else:
-                fresh.append(e)
-                if link == last_link:
+                fresh.append((key, e))
+                if key == last_link:
                     fresh = fresh[:-1]
                     break
 
@@ -255,10 +238,13 @@ def main():
             continue
 
         now_msk = fmt_msk(dt.datetime.now(tz=UTC))
-        rows = [[e["published_msk"], now_msk, ch, e["link"], e["title"], e["text"]] for e in fresh]
+        rows = [[item["published_msk"], now_msk, ch, item["link"], item["title"], item["text"]] for (key, item) in fresh]
         ws.append_rows(rows, value_input_option="RAW")
-        save_state(st, ch, rows[-1][2+1])  # last link = column D (index 3 overall)
-        print(f"[append] {ch}: {len(rows)} rows")
+
+        # обновим state последней канонической ссылкой
+        last_key = fresh[-1][0]
+        save_state(st, ch, last_key)
+        print(f"[append] {ch}: {len(rows)} rows (dedup ok)")
 
 if __name__ == "__main__":
     main()
