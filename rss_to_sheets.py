@@ -1,22 +1,143 @@
-import os, datetime as dt, re, html, time, json
+import os, datetime as dt, re, html
 import feedparser, gspread, requests
 from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 
-# ------------ Настройки ------------
+# ---------- Настройки ----------
 DEFAULT_CHANNELS = ["MELOCHOV", "ABKS07", "jjsbossj", "toolsSADA"]
-# можно указать несколько баз через запятую (будем пробовать по очереди)
 RSS_BASES = [b.strip() for b in os.getenv("RSS_BASES", os.getenv("RSS_BASE","https://rsshub.app")).split(",") if b.strip()]
-INITIAL_LIMIT = int(os.getenv("INITIAL_LIMIT", "50"))   # возьмём побольше на первый запуск
+INITIAL_LIMIT = int(os.getenv("INITIAL_LIMIT", "50"))
 
 GSHEET_TITLE = os.getenv("GSHEET_TITLE", "Telegram Posts Inbox")
 SHEET_NAME   = os.getenv("SHEET_NAME", "Posts")
 STATE_SHEET  = os.getenv("STATE_SHEET", "State")
 GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
-UA = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.1)"
+UA = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.2)"
 
-# ------------ Утилиты ------------
+# ---------- Текст: очистка ----------
+EMOJI_RE = re.compile(
+    "["                                   # основные диапазоны эмодзи
+    "\U0001F300-\U0001F6FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002700-\U000027BF"
+    "\U00002600-\U000026FF"
+    "]+", flags=re.UNICODE
+)
+def strip_emoji(s:str)->str:
+    return EMOJI_RE.sub("", s)
+
+def strip_html(x:str)->str:
+    if not x: return ""
+    x = html.unescape(x)
+    x = re.sub(r"<br\s*/?>", "\n", x, flags=re.I)
+    x = re.sub(r"<[^>]+>", "", x)
+    return x
+
+def normalize_text(raw:str, limit=2000)->str:
+    t = strip_html(raw)
+    t = t.replace("\r", "").replace("\t", " ")
+    t = re.sub(r"[ \u200b\u2060]{2,}", " ", t)             # двойные пробелы/zero-width
+    t = re.sub(r"\n\s*\n\s*", "\n", t)                     # лишние пустые строки
+    t = re.sub(r"[ \u00A0]{2,}", " ", t)
+    t = strip_emoji(t)
+    t = t.strip()
+    return t[:limit]
+
+def make_title_and_text(clean:str, title_limit=120, text_limit=2000):
+    lines = [l.strip() for l in clean.split("\n") if l.strip()]
+    if not lines:
+        return "", ""
+    title = lines[0][:title_limit]
+    rest  = " ".join(lines[1:]).strip()
+    return title, rest[:text_limit]
+
+def parse_date(s:str|None)->str:
+    # YYYY-MM-DD HH:MM:SS (UTC)
+    try:
+        t = feedparser._parse_date(s) if s else None
+        if t: return dt.datetime(*t[:6]).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+# ---------- Sheets ----------
+def gs_open():
+    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(GCP_JSON, scope)
+    gc = gspread.authorize(creds)
+    sh = gc.open(GSHEET_TITLE)
+    try:
+        ws = sh.worksheet(SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=5)
+        ws.append_row(["Date","Channel","Link","Title","Text"])  # <-- порядок сменили!
+    try:
+        st = sh.worksheet(STATE_SHEET)
+    except gspread.WorksheetNotFound:
+        st = sh.add_worksheet(STATE_SHEET, rows=200, cols=2)
+        st.append_row(["Channel","LastLink"])
+    # Базовое форматирование
+    try:
+        sh.batch_update({
+            "requests":[
+                {"updateSheetProperties":{
+                    "properties":{"sheetId": ws.id},
+                    "fields":""
+                }},
+                {"updateDimensionProperties":{
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":0,"endIndex":5},
+                    "properties":{"pixelSize": 110},
+                    "fields":"pixelSize"
+                }},
+                {"updateDimensionProperties":{
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":2,"endIndex":3},
+                    "properties":{"pixelSize": 220},
+                    "fields":"pixelSize"
+                }},
+                {"updateDimensionProperties":{
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":3,"endIndex":4},
+                    "properties":{"pixelSize": 280},
+                    "fields":"pixelSize"
+                }},
+                {"updateDimensionProperties":{
+                    "range":{"sheetId": ws.id, "dimension":"COLUMNS","startIndex":4,"endIndex":5},
+                    "properties":{"pixelSize": 600},
+                    "fields":"pixelSize"
+                }},
+                {"repeatCell":{
+                    "range":{"sheetId": ws.id},
+                    "cell":{"userEnteredFormat":{
+                        "wrapStrategy":"CLIP",
+                        "verticalAlignment":"TOP",
+                        "horizontalAlignment":"LEFT"
+                    }},
+                    "fields":"userEnteredFormat(wrapStrategy,verticalAlignment,horizontalAlignment)"
+                }},
+                {"updateSheetProperties":{
+                    "properties":{"sheetId": ws.id, "gridProperties":{"frozenRowCount":1}},
+                    "fields":"gridProperties.frozenRowCount"
+                }},
+            ]
+        })
+    except Exception:
+        pass
+    return ws, st, sh
+
+def load_state(st):
+    ch = st.col_values(1)[1:]
+    lk = st.col_values(2)[1:]
+    return {c: l for c, l in zip(ch, lk) if c}
+
+def save_state(st, channel, last_link):
+    cells = st.findall(channel, in_column=1)
+    if cells:
+        st.update_cell(cells[-1].row, 2, last_link)
+    else:
+        st.append_row([channel, last_link])
+
+# ---------- Источники ----------
 def norm_channels(csv: str | None):
     if not csv:
         return DEFAULT_CHANNELS
@@ -28,70 +149,22 @@ def norm_channels(csv: str | None):
             out.append(p)
     return out
 
-def strip_html(x: str) -> str:
-    if not x: return ""
-    x = html.unescape(x)
-    x = re.sub(r"<br\s*/?>", "\n", x, flags=re.I)
-    x = re.sub(r"<[^>]+>", "", x)
-    return re.sub(r"\s+\n", "\n", x).strip()
-
-def parse_date(s: str | None) -> str:
-    # приводим к YYYY-MM-DD HH:MM:SS (UTC)
-    try:
-        if not s:
-            return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        # feedparser уже парсит published_parsed
-        return dt.datetime(*feedparser._parse_date(s)[:6]).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-# ------------ Sheets ------------
-def gs_open():
-    scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(GCP_JSON, scope)
-    gc = gspread.authorize(creds)
-    sh = gc.open(GSHEET_TITLE)
-    try:
-        ws = sh.worksheet(SHEET_NAME)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=5)
-        ws.append_row(["Date","Channel","Title","Link","Text"])
-    try:
-        st = sh.worksheet(STATE_SHEET)
-    except gspread.WorksheetNotFound:
-        st = sh.add_worksheet(STATE_SHEET, rows=200, cols=2)
-        st.append_row(["Channel","LastLink"])
-    return ws, st
-
-def load_state(st):
-    # читаем узко: сразу оба столбца, без get_all_records
-    ch = st.col_values(1)[1:]  # без заголовка
-    lk = st.col_values(2)[1:]
-    return {c: l for c, l in zip(ch, lk) if c}
-
-def save_state(st, channel, last_link):
-    cells = st.findall(channel, in_column=1)
-    if cells:
-        st.update_cell(cells[-1].row, 2, last_link)
-    else:
-        st.append_row([channel, last_link])
-
-# ------------ Источники данных ------------
 def rss_entries(username: str):
     for base in RSS_BASES:
         url = f"{base}/telegram/channel/{username}"
         try:
             f = feedparser.parse(url)
-            if f.bozo and not getattr(f, "entries", None):
-                print(f"[warn] RSS bozo via {base} for {username}: {getattr(f,'bozo_exception',None)}")
             if f.entries:
                 out = []
                 for e in f.entries:
+                    text_raw = getattr(e, "summary", "") or ""
+                    text = normalize_text(text_raw)
+                    title, text2 = make_title_and_text(text)
                     out.append({
                         "date": parse_date(getattr(e, "published", "")),
-                        "title": getattr(e, "title", "") or "",
+                        "title": title,
                         "link":  getattr(e, "link", "") or getattr(e, "id", "") or "",
-                        "text":  strip_html(getattr(e, "summary", ""))[:45000],
+                        "text":  text2 if text2 else text,   # если одной строки хватило — кладём её в Text
                     })
                 print(f"[info] RSS OK via {base} for {username}: {len(out)}")
                 return out
@@ -102,7 +175,6 @@ def rss_entries(username: str):
     return []
 
 def html_entries(username: str, limit=100):
-    # fallback: публичная страница t.me/s/<username>
     url = f"https://t.me/s/{username}"
     try:
         r = requests.get(url, headers={"User-Agent": UA}, timeout=25)
@@ -117,38 +189,36 @@ def html_entries(username: str, limit=100):
                 continue
             link = a["href"]
             text_el = msg.select_one(".tgme_widget_message_text")
-            text = text_el.get_text("\n", strip=True) if text_el else ""
+            raw = text_el.get_text("\n", strip=True) if text_el else ""
+            clean = normalize_text(raw)
+            title, rest = make_title_and_text(clean)
             time_el = msg.select_one("time")
             date = time_el.get("datetime") if time_el else ""
             items.append({
                 "date": parse_date(date),
-                "title": "",
+                "title": title,
                 "link": link,
-                "text": text[:45000]
+                "text": rest if rest else clean
             })
             if len(items) >= limit:
                 break
-        if not items:
-            print(f"[warn] t.me/s has no items for {username}")
-        else:
+        if items:
             print(f"[info] Fallback t.me/s used for {username}: {len(items)}")
+        else:
+            print(f"[warn] t.me/s has no items for {username}")
         return items
     except Exception as ex:
         print(f"[warn] t.me/s error for {username}: {ex}")
         return []
 
 def fetch_entries(username: str):
-    # 1) пробуем RSS
     e = rss_entries(username)
-    if e:
-        return e
-    # 2) фолбэк на HTML
-    return html_entries(username)
+    return e if e else html_entries(username)
 
-# ------------ Основной цикл ------------
+# ---------- Основной запуск ----------
 def main():
     channels = norm_channels(os.getenv("CHANNELS_CSV"))
-    ws, st = gs_open()
+    ws, st, _ = gs_open()
     state = load_state(st)
 
     for ch in channels:
@@ -176,11 +246,10 @@ def main():
             print(f"[ok] {ch}: no new items")
             continue
 
-        # нормальная запись: одним батчем
-        rows = [[e["date"], ch, e["title"], e["link"], e["text"]] for e in fresh]
+        rows = [[e["date"], ch, e["link"], e["title"], e["text"]] for e in fresh]
         ws.append_rows(rows, value_input_option="RAW")
-        state[ch] = rows[-1][3]  # last link
-        save_state(st, ch, state[ch])
+        last_link = rows[-1][2]  # C: Link
+        save_state(st, ch, last_link)
         print(f"[append] {ch}: {len(rows)} rows")
 
 if __name__ == "__main__":
