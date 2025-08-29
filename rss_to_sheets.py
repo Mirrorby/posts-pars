@@ -16,7 +16,7 @@ GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
 # бот
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHAT_ID   = os.getenv("CHAT_ID", "").strip()  # число или @username
+CHAT_IDS = [c.strip() for c in os.getenv("CHAT_ID", "").split(",") if c.strip()]
 
 UA  = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.5)"
 MSK = ZoneInfo("Europe/Moscow")
@@ -258,11 +258,12 @@ def main():
         save_state(st, ch, rows[-1][3])  # последняя каноническая ссылка
 
         # 2) Отправка в бота (если заданы токен и чат)
-        if BOT_TOKEN and CHAT_ID:
+        if BOT_TOKEN and CHAT_IDS:
             for r in rows:
                 pub, _, chan, link, title, text = r
                 msg = build_message(chan, pub, link, title, text)
-                tg_send_message(BOT_TOKEN, CHAT_ID, msg, disable_preview=False)
+                for cid in CHAT_IDS:
+                    tg_send_message(BOT_TOKEN, cid, msg, disable_preview=False)
 
         print(f"[append+send] {ch}: {len(rows)} rows")
 
