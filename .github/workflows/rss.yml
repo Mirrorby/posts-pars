@@ -31,6 +31,8 @@ jobs:
           GSHEET_TITLE: ${{ secrets.GSHEET_TITLE }}
           SHEET_NAME: ${{ secrets.SHEET_NAME }}
           GCP_JSON_PATH: gcp_sa.json
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
           # Ниже опционально можно переопределить каналы и базу RSS:
           # CHANNELS_CSV: "MELOCHOV,ABKS07,jjsbossj,toolsSADA"
           # RSS_BASE: "https://rsshub.app"
