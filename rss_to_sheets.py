@@ -104,7 +104,7 @@ def gs_open():
     try: chs = sh.worksheet(CHANNELS_SHEET)
     except gspread.WorksheetNotFound:
         chs = sh.add_worksheet(CHANNELS_SHEET, rows=200, cols=1)
-        chs.update("A1", "Channel")
+        chs.update_cell(1, 1, "Channel")
         # инициализация дефолтами
         rows = [[c] for c in DEFAULT_CHANNELS]
         if rows: chs.append_rows(rows, value_input_option="RAW")
