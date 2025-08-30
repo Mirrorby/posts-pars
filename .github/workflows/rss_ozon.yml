@@ -41,6 +41,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN_OZON }}
           CHAT_ID:   ${{ secrets.CHAT_ID_OZON }}
           ADMIN_IDS: ${{ secrets.ADMIN_IDS_OZON }}
+          NOTIFY_IDS: ${{ secrets.NOTIFY_IDS }}
 
           # ——— инстансы rsshub (по желанию, отдельные) ———
           RSS_BASES: ${{ secrets.RSS_BASES_OZON }}
