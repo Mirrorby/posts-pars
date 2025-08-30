@@ -1,0 +1,49 @@
+name: RSS to Sheets (OZON)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write GCP key file
+        env:
+          GCP_JSON: ${{ secrets.GCP_JSON }}
+        run: |
+          echo "$GCP_JSON" > gcp_sa.json
+
+      - name: Run importer (OZON)
+        env:
+          # ——— таблица для озона ———
+          GSHEET_TITLE:  ${{ secrets.GSHEET_TITLE_OZON }}
+          SHEET_NAME:    ${{ secrets.SHEET_NAME_OZON }}
+          STATE_SHEET:   State
+          CHANNELS_SHEET: Channels
+          BOTSTATE_SHEET: BotState
+          GCP_JSON_PATH: gcp_sa.json
+
+          # ——— бот для озона ———
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN_OZON }}
+          CHAT_ID:   ${{ secrets.CHAT_ID_OZON }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS_OZON }}
+
+          # ——— инстансы rsshub (по желанию, отдельные) ———
+          RSS_BASES: ${{ secrets.RSS_BASES_OZON }}
+
+          # поведение «только 1 пост при первом добавлении» уже в коде
+        run: python rss_to_sheets.py
