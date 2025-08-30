@@ -332,9 +332,8 @@ def main():
             if key and key in known:
                 continue
             if not last_link_key:
-                fresh.append((key, e))
-                if len(fresh) > INITIAL_LIMIT:
-                    fresh = fresh[-INITIAL_LIMIT:]
+                # при первом добавлении канала берём только последний пост
+                fresh = [(key, e)]  # перезаписываем и сразу выходим
             else:
                 fresh.append((key, e))
                 if key == last_link_key:
