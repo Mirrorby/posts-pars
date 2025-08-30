@@ -4,8 +4,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
 
-# ============ Конфигурация ============
-DEFAULT_CHANNELS = ["MELOCHOV", "ABKS07", "jjsbossj", "toolsSADA"]
+# ======= Конфигурация =======
 RSS_BASES = [b.strip() for b in os.getenv("RSS_BASES", os.getenv("RSS_BASE","https://rsshub.app")).split(",") if b.strip()]
 INITIAL_LIMIT = int(os.getenv("INITIAL_LIMIT", "50"))
 
@@ -18,13 +17,13 @@ GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_IDS  = [c.strip() for c in os.getenv("CHAT_ID", "").split(",") if c.strip()]
-ADMIN_IDS = [a.strip() for a in os.getenv("ADMIN_IDS", "").split(",") if a.strip()]  # user_id разрешённых отправителей
+ADMIN_IDS = [a.strip() for a in os.getenv("ADMIN_IDS", "").split(",") if a.strip()]  # можно не задавать
 
-UA  = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.6)"
+UA  = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.7)"
 MSK = ZoneInfo("Europe/Moscow")
 UTC = ZoneInfo("UTC")
 
-# ============ Утилиты текста и ссылок ============
+# ======= Текст и ссылки =======
 EMOJI_RE = re.compile("[" "\U0001F300-\U0001F6FF" "\U0001F900-\U0001F9FF" "\U0001FA70-\U0001FAFF" "\U00002700-\U000027BF" "\U00002600-\U000026FF" "]+")
 TME_RE = re.compile(r"https?://t\.me/(?:s/)?([^/]+)/(\d+)", re.I)
 
@@ -61,7 +60,7 @@ def canonical_link(link: str) -> str:
         return f"https://t.me/{user}/{mid}"
     return link.split("?")[0].rstrip("/").lower()
 
-# ============ Дата/время ============
+# ======= Дата/время =======
 def fmt_msk(dt_obj: dt.datetime) -> str:
     return dt_obj.astimezone(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -84,32 +83,35 @@ def parse_any_datetime_to_utc(s: str | None) -> dt.datetime:
     except Exception: pass
     return dt.datetime.now(tz=UTC)
 
-# ============ Google Sheets ============
+# ======= Google Sheets =======
 def gs_open():
     scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(GCP_JSON, scope)
     gc = gspread.authorize(creds)
     sh = gc.open(GSHEET_TITLE)
     # Posts
-    try: ws = sh.worksheet(SHEET_NAME)
+    try:
+        ws = sh.worksheet(SHEET_NAME)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(SHEET_NAME, rows=2000, cols=6)
         ws.append_row(["PublishedAt (MSK)","AddedAt (MSK)","Channel","Link","Title","Text"])
     # State
-    try: st = sh.worksheet(STATE_SHEET)
+    try:
+        st = sh.worksheet(STATE_SHEET)
     except gspread.WorksheetNotFound:
         st = sh.add_worksheet(STATE_SHEET, rows=200, cols=2)
         st.append_row(["Channel","LastLink"])
     # Channels
-    try: chs = sh.worksheet(CHANNELS_SHEET)
+    try:
+        chs = sh.worksheet(CHANNELS_SHEET)
     except gspread.WorksheetNotFound:
         chs = sh.add_worksheet(CHANNELS_SHEET, rows=200, cols=1)
         chs.update_cell(1, 1, "Channel")
-        # инициализация дефолтами
-        rows = [[c] for c in DEFAULT_CHANNELS]
-        if rows: chs.append_rows(rows, value_input_option="RAW")
-    # BotState (last_update_id)
-    try: bs = sh.worksheet(BOTSTATE_SHEET)
+        # можно сразу подсказку: в A2...
+        # chs.update_cell(2, 1, "@example_channel")
+    # BotState
+    try:
+        bs = sh.worksheet(BOTSTATE_SHEET)
     except gspread.WorksheetNotFound:
         bs = sh.add_worksheet(BOTSTATE_SHEET, rows=5, cols=2)
         bs.append_row(["Key","Value"])
@@ -128,13 +130,13 @@ def save_state(st, channel, last_link):
 
 def get_channels(chs):
     vals = chs.col_values(1)[1:]  # без заголовка
-    # нормализуем @/t.me/
     out = []
     for v in vals:
         v = (v or "").strip()
         if not v: continue
         v = v.lstrip("@").split("/")[-1]
         if v: out.append(v)
+    # уникальные + сортировка для стабильности
     return sorted(list(dict.fromkeys(out)))
 
 def add_channel(chs, name: str) -> bool:
@@ -147,34 +149,7 @@ def add_channel(chs, name: str) -> bool:
     chs.append_row([name])
     return True
 
-def remove_channel(chs, name: str) -> bool:
-    name = (name or "").strip()
-    if not name: return False
-    name = name.lstrip("@").split("/")[-1]
-    vals = chs.col_values(1)
-    for idx, val in enumerate(vals, start=1):
-        if idx == 1: continue
-        if (val or "").strip().lstrip("@").split("/")[-1] == name:
-            chs.delete_rows(idx)
-            return True
-    return False
-
-def get_kv(bs, key: str, default: str="0") -> str:
-    vals = bs.get_all_values()
-    for row in vals:
-        if row and row[0] == key:
-            return row[1] if len(row) > 1 else default
-    bs.append_row([key, default])
-    return default
-
-def set_kv(bs, key: str, value: str):
-    cells = bs.findall(key, in_column=1)
-    if cells:
-        bs.update_cell(cells[-1].row, 2, value)
-    else:
-        bs.append_row([key, value])
-
-# ============ Источники ============
+# ======= Источники =======
 def rss_entries(username: str):
     for base in RSS_BASES:
         url = f"{base}/telegram/channel/{username}"
@@ -236,11 +211,10 @@ def fetch_entries(username: str):
     e = rss_entries(username)
     return e if e else html_entries(username)
 
-# ============ Bot API ============
+# ======= Bot API =======
 def tg_send_message(token: str, chat_id: str, html_text: str, disable_preview=False):
     if not token or not chat_id: return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    # режем до лимита 4096
     parts = [html_text[i:i+4000] for i in range(0, len(html_text), 4000)] or [html_text]
     for i, chunk in enumerate(parts):
         data = {
@@ -263,25 +237,19 @@ def build_post_message(ch: str, pub_msk: str, link: str, title: str, text: str) 
     link  = html.escape(link)
     return f"<b>{ch}</b> • <i>{pub_msk}</i>\n<a href=\"{link}\">Пост</a>\n\n<b>{title}</b>\n{text}"
 
-def process_bot_updates(bs, chs):
-    """Обрабатывает команды: /list, /add <channel>, /remove <channel>.
-       Хранит offset в BotState (last_update_id).
-    """
-    if not BOT_TOKEN:
-        return
-
+def process_add_commands(bs, chs):
+    """Принимает только /add <username|url>. Offset хранит в BotState."""
+    if not BOT_TOKEN: return
     last = int(get_kv(bs, "last_update_id", "0"))
     url  = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     try:
         resp = requests.get(url, params={"timeout": 0, "offset": last+1}, timeout=20)
         data = resp.json()
-        if not data.get("ok"):
-            print("[warn] getUpdates:", data)
-            return
+        if not data.get("ok"): 
+            print("[warn] getUpdates:", data); return
         updates = data.get("result", [])
     except Exception as ex:
-        print("[warn] getUpdates error:", ex)
-        return
+        print("[warn] getUpdates error:", ex); return
 
     for upd in updates:
         last = max(last, upd.get("update_id", 0))
@@ -291,47 +259,38 @@ def process_bot_updates(bs, chs):
         from_user = msg.get("from") or {}
         sender_id = str(from_user.get("id", ""))
 
-        # авторизация отправителя (если задан ADMIN_IDS)
         if ADMIN_IDS and sender_id not in ADMIN_IDS:
             continue
-
-        if not text.startswith("/"):
+        if not text.lower().startswith("/add"):
             continue
 
-        def reply(s: str):
-            try:
-                tg_send_message(BOT_TOKEN, str(chat.get("id")), s, disable_preview=True)
-            except Exception as e:
-                print("[warn] reply failed:", e)
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            tg_send_message(BOT_TOKEN, str(chat.get("id")), "Пришлите так: /add https://t.me/username", True)
+            continue
 
-        cmd, *args = text.split(maxsplit=1)
-        cmd = cmd.lower()
-
-        if cmd == "/list":
-            lst = get_channels(chs)
-            if lst:
-                reply("📡 Отслеживаемые каналы:\n" + "\n".join(f"• @{c}" for c in lst))
-            else:
-                reply("Список каналов пуст. Добавьте через: /add <ссылка или @username>")
-        elif cmd == "/add":
-            if not args:
-                reply("Пришлите так: /add https://t.me/username (или @username)")
-            else:
-                cand = args[0].strip()
-                ok = add_channel(chs, cand)
-                reply("✅ Канал добавлен" if ok else "ℹ️ Канал уже есть или некорректный")
-        elif cmd == "/remove":
-            if not args:
-                reply("Пришлите так: /remove https://t.me/username (или @username)")
-            else:
-                cand = args[0].strip()
-                ok = remove_channel(chs, cand)
-                reply("🗑️ Канал удалён" if ok else "ℹ️ Канал не найден")
+        cand = parts[1].strip()
+        ok = add_channel(chs, cand)
+        tg_send_message(BOT_TOKEN, str(chat.get("id")), "✅ Канал добавлен" if ok else "ℹ️ Канал уже есть или некорректный", True)
 
     set_kv(bs, "last_update_id", str(last))
 
-# ============ Основной запуск ============
-def known_links_set(ws, channel: str, window: int = 600) -> set[str]:
+# ======= KV в BotState =======
+def get_kv(bs, key: str, default: str="0") -> str:
+    vals = bs.get_all_values()
+    for row in vals:
+        if row and row[0] == key:
+            return row[1] if len(row) > 1 else default
+    bs.append_row([key, default])
+    return default
+
+def set_kv(bs, key: str, value: str):
+    cells = bs.findall(key, in_column=1)
+    if cells: bs.update_cell(cells[-1].row, 2, value)
+    else:     bs.append_row([key, value])
+
+# ======= Антидубль в таблице =======
+def known_links_set(ws, channel: str, window: int = 800) -> set[str]:
     values = ws.get_all_values()
     if len(values) <= 1: return set()
     tail = values[-min(window, len(values)-1):]
@@ -343,33 +302,32 @@ def known_links_set(ws, channel: str, window: int = 600) -> set[str]:
             out.add(canonical_link(ln))
     return out
 
+# ======= Основной запуск =======
 def main():
     sh, ws, st, chs, bs = gs_open()
 
-    # 0) обработать команды бота (если есть)
-    process_bot_updates(bs, chs)
+    # 0) принять новые /add и обновить лист Channels
+    process_add_commands(bs, chs)
 
-    # 1) собрать список каналов из листа Channels
+    # 1) получить список каналов из листа Channels
     channels = get_channels(chs)
     if not channels:
-        print("[warn] Channels sheet empty")
+        print("[warn] Channels sheet empty — добавьте строки в столбец A")
         return
 
-    # 2) стейты и антидубль
+    # 2) загрузить состояние
     state = load_state(st)
 
     for ch in channels:
-        # сбор источников
         entries = fetch_entries(ch)
-        if not entries:
+        if not entries: 
             continue
 
         known = known_links_set(ws, ch, window=800)
         last_link_key = canonical_link(state.get(ch, ""))
 
-        # от старых к новым
         fresh = []
-        for e in reversed(entries):
+        for e in reversed(entries):  # oldest -> newest
             key = canonical_link(e["link"] or (e["title"] + "|" + e["published_msk"]))
             if key and key in known:
                 continue
@@ -389,11 +347,9 @@ def main():
 
         now_msk = fmt_msk(dt.datetime.now(tz=UTC))
         rows = [[e["published_msk"], now_msk, ch, canonical_link(e["link"]), e["title"], e["text"]] for (key, e) in fresh]
-        # 3) запись в таблицу
         ws.append_rows(rows, value_input_option="RAW")
         save_state(st, ch, rows[-1][3])
 
-        # 4) отправка в бота
         if BOT_TOKEN and CHAT_IDS:
             for r in rows:
                 pub, _, chan, link, title, text = r
