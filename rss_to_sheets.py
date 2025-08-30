@@ -17,6 +17,7 @@ GCP_JSON     = os.getenv("GCP_JSON_PATH", "gcp_sa.json")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHAT_IDS  = [c.strip() for c in os.getenv("CHAT_ID", "").split(",") if c.strip()]
+NOTIFY_IDS = [c.strip() for c in os.getenv("NOTIFY_IDS", "").split(",") if c.strip()]
 ADMIN_IDS = [a.strip() for a in os.getenv("ADMIN_IDS", "").split(",") if a.strip()]  # можно не задавать
 
 UA  = "Mozilla/5.0 (compatible; tg-rss-to-sheets/1.7)"
@@ -238,14 +239,15 @@ def build_post_message(ch: str, pub_msk: str, link: str, title: str, text: str) 
     return f"<b>{ch}</b> • <i>{pub_msk}</i>\n<a href=\"{link}\">Пост</a>\n\n<b>{title}</b>\n{text}"
 
 def process_add_commands(bs, chs):
-    """Принимает только /add <username|url>. Offset хранит в BotState."""
-    if not BOT_TOKEN: return
+    """Принимает только /add <username|url>. Уведомления шлём в NOTIFY_IDS (или отправителю, если NOTIFY_IDS пуст)."""
+    if not BOT_TOKEN:
+        return
     last = int(get_kv(bs, "last_update_id", "0"))
     url  = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     try:
         resp = requests.get(url, params={"timeout": 0, "offset": last+1}, timeout=20)
         data = resp.json()
-        if not data.get("ok"): 
+        if not data.get("ok"):
             print("[warn] getUpdates:", data); return
         updates = data.get("result", [])
     except Exception as ex:
@@ -255,23 +257,31 @@ def process_add_commands(bs, chs):
         last = max(last, upd.get("update_id", 0))
         msg = upd.get("message") or {}
         text = (msg.get("text") or "").strip()
-        chat = msg.get("chat") or {}
         from_user = msg.get("from") or {}
         sender_id = str(from_user.get("id", ""))
 
+        # кто может командовать
         if ADMIN_IDS and sender_id not in ADMIN_IDS:
             continue
+
         if not text.lower().startswith("/add"):
             continue
 
+        # куда отправлять уведомления: NOTIFY_IDS или личка отправителя
+        targets = NOTIFY_IDS or [sender_id]
+
+        def notify(s: str):
+            for cid in targets:
+                tg_send_message(BOT_TOKEN, cid, s, disable_preview=True)
+
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            tg_send_message(BOT_TOKEN, str(chat.get("id")), "Пришлите так: /add https://t.me/username", True)
+            notify("Пришлите так: /add https://t.me/username")
             continue
 
         cand = parts[1].strip()
         ok = add_channel(chs, cand)
-        tg_send_message(BOT_TOKEN, str(chat.get("id")), "✅ Канал добавлен" if ok else "ℹ️ Канал уже есть или некорректный", True)
+        notify("✅ Канал добавлен" if ok else "ℹ️ Канал уже есть или некорректный")
 
     set_kv(bs, "last_update_id", str(last))
 
