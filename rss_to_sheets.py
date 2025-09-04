@@ -336,23 +336,26 @@ def main():
         known = known_links_set(ws, ch, window=800)
         last_link_key = canonical_link(state.get(ch, ""))
 
-        fresh = []
-        for e in reversed(entries):  # oldest -> newest
-            key = canonical_link(e["link"] or (e["title"] + "|" + e["published_msk"]))
-            if key and key in known:
-                continue
-            if not last_link_key:
-                # при первом добавлении канала берём только последний пост
-                fresh = [(key, e)]  # перезаписываем и сразу выходим
-            else:
-                fresh.append((key, e))
-                if key == last_link_key:
-                    fresh = fresh[:-1]
-                    break
-
-        if not fresh:
-            print(f"[ok] {ch}: no new items")
+        # --- ВСЕГДА отправляем только самый свежий пост ---
+        # выберем самый новый по PublishedAt (MSK) — формат YYYY-MM-DD HH:MM:SS сравнивается корректно
+        newest = max(entries, key=lambda x: x["published_msk"])
+        new_key = canonical_link(newest["link"] or (newest["title"] + "|" + newest["published_msk"]))
+        
+        # антидубликат: если уже есть в таблице или это тот же, что в State — ничего не шлём
+        if (not new_key) or (new_key in known) or (new_key == canonical_link(state.get(ch, ""))):
+            print(f"[ok] {ch}: no new items (latest already known)")
             continue
+        
+        # иначе готовим ровно одну строку
+        now_msk = fmt_msk(dt.datetime.now(tz=UTC))
+        rows = [[
+            newest["published_msk"],
+            now_msk,
+            ch,
+            canonical_link(newest["link"]),
+            newest["title"],
+            newest["text"],
+        ]]
 
         now_msk = fmt_msk(dt.datetime.now(tz=UTC))
         rows = [[e["published_msk"], now_msk, ch, canonical_link(e["link"]), e["title"], e["text"]] for (key, e) in fresh]
