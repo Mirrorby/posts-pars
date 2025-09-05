@@ -358,7 +358,14 @@ def main():
         ]]
 
         now_msk = fmt_msk(dt.datetime.now(tz=UTC))
-        rows = [[e["published_msk"], now_msk, ch, canonical_link(e["link"]), e["title"], e["text"]] for (key, e) in fresh]
+        rows = [[
+            newest["published_msk"],
+            now_msk,
+            ch,
+            canonical_link(newest["link"]),
+            newest["title"],
+            newest["text"],
+        ]]
         ws.append_rows(rows, value_input_option="RAW")
         save_state(st, ch, rows[-1][3])
 
