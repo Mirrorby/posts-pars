@@ -328,55 +328,57 @@ def main():
     # 2) загрузить состояние
     state = load_state(st)
 
+    # Обрабатываем каждый канал отдельно
     for ch in channels:
+        print(f"[processing] Checking channel: {ch}")
+        
         entries = fetch_entries(ch)
         if not entries: 
+            print(f"[skip] {ch}: no entries found")
             continue
 
+        # Получаем список уже известных ссылок для этого канала
         known = known_links_set(ws, ch, window=800)
-        last_link_key = canonical_link(state.get(ch, ""))
-
-        # --- ВСЕГДА отправляем только самый свежий пост ---
-        # выберем самый новый по PublishedAt (MSK) — формат YYYY-MM-DD HH:MM:SS сравнивается корректно
+        
+        # Находим самый новый пост для этого канала
         newest = max(entries, key=lambda x: x["published_msk"])
         new_key = canonical_link(newest["link"] or (newest["title"] + "|" + newest["published_msk"]))
         
-        # антидубликат: если уже есть в таблице или это тот же, что в State — ничего не шлём
-        if (not new_key) or (new_key in known) or (new_key == canonical_link(state.get(ch, ""))):
-            print(f"[ok] {ch}: no new items (latest already known)")
+        # Проверяем: есть ли этот пост уже в таблице
+        if (not new_key) or (new_key in known):
+            print(f"[skip] {ch}: latest post already exists in table")
             continue
         
-        # иначе готовим ровно одну строку
+        # Проверяем: это тот же пост, что в State (последний обработанный)
+        if new_key == canonical_link(state.get(ch, "")):
+            print(f"[skip] {ch}: latest post already processed (same as in state)")
+            continue
+        
+        # Если дошли сюда - у нас есть новый пост для этого канала
         now_msk = fmt_msk(dt.datetime.now(tz=UTC))
-        rows = [[
+        new_row = [
             newest["published_msk"],
             now_msk,
             ch,
             canonical_link(newest["link"]),
             newest["title"],
             newest["text"],
-        ]]
+        ]
 
-        now_msk = fmt_msk(dt.datetime.now(tz=UTC))
-        rows = [[
-            newest["published_msk"],
-            now_msk,
-            ch,
-            canonical_link(newest["link"]),
-            newest["title"],
-            newest["text"],
-        ]]
-        ws.append_rows(rows, value_input_option="RAW")
-        save_state(st, ch, rows[-1][3])
+        # Добавляем в таблицу
+        ws.append_row(new_row, value_input_option="RAW")
+        
+        # Обновляем состояние для этого канала
+        save_state(st, ch, new_row[3])
 
+        # Отправляем в Telegram, если настроено
         if BOT_TOKEN and CHAT_IDS:
-            for r in rows:
-                pub, _, chan, link, title, text = r
-                msg = build_post_message(chan, pub, link, title, text)
-                for cid in CHAT_IDS:
-                    tg_send_message(BOT_TOKEN, cid, msg, disable_preview=False)
+            pub, _, chan, link, title, text = new_row
+            msg = build_post_message(chan, pub, link, title, text)
+            for cid in CHAT_IDS:
+                tg_send_message(BOT_TOKEN, cid, msg, disable_preview=False)
 
-        print(f"[append+send] {ch}: {len(rows)} rows")
+        print(f"[success] {ch}: added new post and sent to Telegram")
 
 if __name__ == "__main__":
     main()
